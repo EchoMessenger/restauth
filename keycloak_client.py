@@ -35,7 +35,11 @@ async def authenticate(username: str, password: str) -> dict | None:
             return None
 
     if resp.status_code == 200:
-        return resp.json()
+        try:
+            return resp.json()
+        except ValueError:
+            logger.warning("Keycloak token response is not valid JSON")
+            return None
 
     logger.warning(
         "Keycloak auth failed: status=%s body=%s",
