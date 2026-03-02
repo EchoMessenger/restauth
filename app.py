@@ -103,19 +103,20 @@ async def auth_endpoint(body: TinodeRequest):
 
     # 1. Проверяем credentials в Keycloak
     token_data = await authenticate(username, password)
-    if token_data is None:
+    if token_data is None or not isinstance(token_data, dict):
         return _err("failed")
 
     # 2. Получаем профиль
     access_token = token_data.get("access_token")
     if not access_token:
         return _err("internal")
+
     userinfo = await get_userinfo(access_token)
-    if userinfo is None:
+    if userinfo is None or not isinstance(userinfo, dict):
         return _err("internal")
 
     keycloak_id = userinfo.get("sub")
-    if not keycloak_id:
+    if not isinstance(keycloak_id, str) or not keycloak_id:
         return _err("internal")
     email: str = userinfo.get("email", "")
     preferred: str = userinfo.get("preferred_username", username)
@@ -171,7 +172,7 @@ async def link_endpoint(body: TinodeRequest):
         return _err("malformed")
 
     token_data = await authenticate(username, password)
-    if token_data is None:
+    if token_data is None or not isinstance(token_data, dict):
         return _err("failed")
 
     access_token = token_data.get("access_token")
@@ -179,10 +180,13 @@ async def link_endpoint(body: TinodeRequest):
         return _err("internal")
 
     userinfo = await get_userinfo(access_token)
-    if userinfo is None or "sub" not in userinfo:
+    if userinfo is None or not isinstance(userinfo, dict):
+        return _err("internal")
+    sub = userinfo.get("sub")
+    if not isinstance(sub, str) or not sub:
         return _err("internal")
 
-    mapping = await get_by_keycloak_id(userinfo["sub"])
+    mapping = await get_by_keycloak_id(sub)
     if mapping is None:
         return _err("not found")
 

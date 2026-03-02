@@ -22,6 +22,7 @@ async def authenticate(username: str, password: str) -> dict | None:
         "client_id": cfg.keycloak_client_id,
         "username": username,
         "password": password,
+        "scope": "openid profile email",
     }
     if cfg.keycloak_client_secret:
         payload["client_secret"] = cfg.keycloak_client_secret

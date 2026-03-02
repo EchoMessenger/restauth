@@ -1,18 +1,16 @@
 """Конфигурация сервиса."""
 
-from pydantic_settings import BaseSettings
 from typing import Annotated
 from pydantic import field_validator
-from pydantic_settings import NoDecode
+from pydantic_settings import BaseSettings, NoDecode
 
-import os
 
 class Settings(BaseSettings):
     # ── Keycloak ──────────────────────────────────────────
-    keycloak_url: str = os.getenv("KEYCLOAK_URL")
-    keycloak_realm: str = os.getenv("KEYCLOAK_REALM")
-    keycloak_client_id: str = os.getenv("KEYCLOAK_CLIENT_ID")
-    keycloak_client_secret: str = os.getenv("KEYCLOAK_CLIENT_SECRET")
+    keycloak_url: str
+    keycloak_realm: str
+    keycloak_client_id: str
+    keycloak_client_secret: str
 
     # ── Приложение ────────────────────────────────────────
     host: str = "0.0.0.0"
