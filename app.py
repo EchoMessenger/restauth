@@ -6,6 +6,7 @@ Tinode REST/JSON-RPC authentication service — Keycloak back-end (FastAPI).
 """
 
 import base64
+import binascii
 import logging
 from contextlib import asynccontextmanager
 
@@ -61,8 +62,8 @@ app = FastAPI(
 
 def _parse_secret(encoded: str) -> tuple[str | None, str | None]:
     try:
-        raw = base64.b64decode(encoded).decode("utf-8")
-    except Exception:
+        raw = base64.b64decode(encoded, validate=True).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError):
         return None, None
     parts = raw.split(":", 1)
     if len(parts) != 2 or not parts[0] or not parts[1]:
@@ -106,11 +107,16 @@ async def auth_endpoint(body: TinodeRequest):
         return _err("failed")
 
     # 2. Получаем профиль
-    userinfo = await get_userinfo(token_data["access_token"])
+    access_token = token_data.get("access_token")
+    if not access_token:
+        return _err("internal")
+    userinfo = await get_userinfo(access_token)
     if userinfo is None:
         return _err("internal")
 
-    keycloak_id: str = userinfo["sub"]
+    keycloak_id = userinfo.get("sub")
+    if not keycloak_id:
+        return _err("internal")
     email: str = userinfo.get("email", "")
     preferred: str = userinfo.get("preferred_username", username)
 
@@ -160,18 +166,30 @@ async def link_endpoint(body: TinodeRequest):
     if not body.rec or not body.rec.uid or not body.secret:
         return _err("malformed")
 
-    username, _ = _parse_secret(body.secret)
+    username, password = _parse_secret(body.secret)
     if username is None:
         return _err("malformed")
 
-    mapping = await get_by_username(username)
+    token_data = await authenticate(username, password)
+    if token_data is None:
+        return _err("failed")
+
+    access_token = token_data.get("access_token")
+    if not access_token:
+        return _err("internal")
+
+    userinfo = await get_userinfo(access_token)
+    if userinfo is None or "sub" not in userinfo:
+        return _err("internal")
+
+    mapping = await get_by_keycloak_id(userinfo["sub"])
     if mapping is None:
         return _err("not found")
 
     if mapping.get("tinode_uid"):
         return _err("duplicate value")
 
-    if not await link_tinode_uid(username, body.rec.uid):
+    if not await link_tinode_uid(mapping["keycloak_username"], body.rec.uid):
         return _err("internal")
 
     logger.info("Linked %s → %s", username, body.rec.uid)

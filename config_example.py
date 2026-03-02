@@ -1,14 +1,18 @@
 """Конфигурация сервиса."""
 
 from pydantic_settings import BaseSettings
+from typing import Annotated
+from pydantic import field_validator
+from pydantic_settings import NoDecode
 
+import os
 
 class Settings(BaseSettings):
     # ── Keycloak ──────────────────────────────────────────
-    keycloak_url: str = "http://localhost:8080"
-    keycloak_realm: str = "tinode"
-    keycloak_client_id: str = "tinode-server"
-    keycloak_client_secret: str = ""
+    keycloak_url: str = os.getenv("KEYCLOAK_URL")
+    keycloak_realm: str = os.getenv("KEYCLOAK_REALM")
+    keycloak_client_id: str = os.getenv("KEYCLOAK_CLIENT_ID")
+    keycloak_client_secret: str = os.getenv("KEYCLOAK_CLIENT_SECRET")
 
     # ── Приложение ────────────────────────────────────────
     host: str = "0.0.0.0"
@@ -19,7 +23,13 @@ class Settings(BaseSettings):
     db_path: str = "tinode_keycloak.db"
 
     # ── Теги ──────────────────────────────────────────────
-    restricted_tag_ns: list[str] = ["rest", "email", "uname"]
+    restricted_tag_ns: Annotated[list[str], NoDecode] = ["rest", "email", "uname"]
+    @ field_validator("restricted_tag_ns", mode="before")
+    @ classmethod
+    def parse_restricted_tag_ns(cls, value):
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
     login_validation_re: str = r"^[a-zA-Z0-9_.\-@]{3,64}$"
 
     # ── Computed ──────────────────────────────────────────

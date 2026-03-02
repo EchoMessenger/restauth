@@ -34,8 +34,8 @@ async def get_by_keycloak_id(keycloak_id: str) -> dict | None:
     async with aiosqlite.connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM user_mapping WHERE keycloak_id = ?",
-            (keycloak_id,),
+                "SELECT * FROM user_mapping WHERE keycloak_id = ?",
+                (keycloak_id,),
         ) as cursor:
             row = await cursor.fetchone()
     return dict(row) if row else None
@@ -45,8 +45,8 @@ async def get_by_username(username: str) -> dict | None:
     async with aiosqlite.connect(_db_path) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM user_mapping WHERE keycloak_username = ?",
-            (username,),
+                "SELECT * FROM user_mapping WHERE keycloak_username = ?",
+                (username,),
         ) as cursor:
             row = await cursor.fetchone()
     return dict(row) if row else None
@@ -69,15 +69,18 @@ async def upsert_user(keycloak_id: str, username: str) -> None:
 
 async def link_tinode_uid(username: str, tinode_uid: str) -> bool:
     async with aiosqlite.connect(_db_path) as db:
-        cursor = await db.execute(
-            """
-            UPDATE user_mapping
-               SET tinode_uid = ?,
-                   updated_at = CURRENT_TIMESTAMP
-             WHERE keycloak_username = ?
-               AND tinode_uid IS NULL
-            """,
-            (tinode_uid, username),
-        )
-        await db.commit()
-        return cursor.rowcount > 0
+        try:
+            cursor = await db.execute(
+                """
+                UPDATE user_mapping
+                   SET tinode_uid = ?,
+                       updated_at = CURRENT_TIMESTAMP
+                WHERE keycloak_username = ?
+                   AND tinode_uid IS NULL
+                """,
+                (tinode_uid, username),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+        except aiosqlite.IntegrityError:
+            return False
