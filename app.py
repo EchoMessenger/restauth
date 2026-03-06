@@ -14,6 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from config_example import cfg
+
 from models import (
     TinodeRequest,
     TinodeResponse,
