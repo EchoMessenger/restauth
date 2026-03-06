@@ -18,10 +18,13 @@ async def init_db() -> None:
     """Создать пул соединений и таблицу."""
     global _pool
 
-    _pool = await asyncpg.create_pool(_db_dsn)
+    if _pool is None:
+        return
 
-    async with _pool.acquire() as conn:
-        await conn.execute(
+    pool = await asyncpg.create_pool(_db_dsn)
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
             """
             CREATE TABLE IF NOT EXISTS user_mapping (
                 keycloak_id       TEXT PRIMARY KEY,
@@ -31,7 +34,12 @@ async def init_db() -> None:
                 updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
-        )
+            )
+    except Exception:
+        await pool.close()
+        raise
+    
+    _pool = pool
 
     logger.info("Database initialised")
 
