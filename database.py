@@ -18,7 +18,7 @@ async def init_db() -> None:
     """Создать пул соединений и таблицу."""
     global _pool
 
-    if _pool is None:
+    if _pool is not None:
         return
 
     pool = await asyncpg.create_pool(_db_dsn)
@@ -38,7 +38,7 @@ async def init_db() -> None:
     except Exception:
         await pool.close()
         raise
-    
+
     _pool = pool
 
     logger.info("Database initialised")
