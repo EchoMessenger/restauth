@@ -9,9 +9,12 @@ import base64
 import binascii
 import logging
 from contextlib import asynccontextmanager
+import traceback
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi import APIRouter
+from fastapi.routing import APIRoute
 
 from config_example import cfg
 
@@ -95,6 +98,10 @@ def _err(msg: str) -> TinodeResponse:
 async def auth_endpoint(body: TinodeRequest):
     """Аутентификация пользователя через Keycloak."""
 
+    endpoint = (body.endpoint or "auth").lower()
+    if endpoint != "auth":
+        return _err("not found")
+
     if not body.secret:
         return _err("malformed")
 
@@ -165,6 +172,10 @@ async def auth_endpoint(body: TinodeRequest):
 async def link_endpoint(body: TinodeRequest):
     """Привязка Tinode UID к учётной записи Keycloak."""
 
+    endpoint = (body.endpoint or "link").lower()
+    if endpoint != "link":
+        return _err("not found")
+
     if not body.rec or not body.rec.uid or not body.secret:
         return _err("malformed")
 
@@ -205,7 +216,8 @@ async def link_endpoint(body: TinodeRequest):
 
 @app.post("/rtagns", response_model=TinodeResponse, response_model_exclude_none=True)
 async def rtagns_endpoint():
-    """Список restricted tag namespaces."""
+    """Список restricted tag name
+    spaces."""
     return TinodeResponse(
         strarr=cfg.restricted_tag_ns,
         byteval=base64.b64encode(
@@ -225,7 +237,10 @@ async def rtagns_endpoint():
 @app.post("/gen")
 @app.post("/upd")
 async def unsupported_endpoint():
-    return ErrorResponse(err="unsupported")
+    return JSONResponse(
+        status_code=200,
+        content={"err": "unsupported"}
+    )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -252,6 +267,17 @@ async def handle_405(request: Request, exc):
 async def handle_500(request: Request, exc):
     return JSONResponse(status_code=500, content={"err": "internal"})
 
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error("Unhandled exception: %s\n%s", exc, traceback.format_exc())
+    return JSONResponse(status_code=500, content={"err": "internal"})
+
+@app.api_route("/{full_path:path}", methods=["POST"])
+async def catch_all_post(full_path: str):
+    return JSONResponse(
+        status_code=404,
+        content={"err": "not found"}
+    )
 
 # ── Entry point ───────────────────────────────────────────────
 
