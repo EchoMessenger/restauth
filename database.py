@@ -1,21 +1,30 @@
 """
-Асинхронное хранилище маппинга Keycloak ↔ Tinode UID (aiosqlite).
+Асинхронное хранилище маппинга Keycloak ↔ Tinode UID (PostgreSQL).
 """
 
 import logging
-import aiosqlite
+import asyncpg
 
 from config_example import cfg
 
 logger = logging.getLogger("tinode-rest-auth.db")
 
-_db_path = cfg.db_path
+_db_dsn = cfg.db_dsn  # например: postgres://user:pass@localhost:5432/tinode_auth
+
+_pool: asyncpg.Pool | None = None
 
 
 async def init_db() -> None:
-    """Создать таблицу, если её ещё нет."""
-    async with aiosqlite.connect(_db_path) as db:
-        await db.execute(
+    """Создать пул соединений и таблицу."""
+    global _pool
+
+    if _pool is not None:
+        return
+
+    pool = await asyncpg.create_pool(_db_dsn)
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute(
             """
             CREATE TABLE IF NOT EXISTS user_mapping (
                 keycloak_id       TEXT PRIMARY KEY,
@@ -25,62 +34,88 @@ async def init_db() -> None:
                 updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
-        )
-        await db.commit()
-    logger.info("Database initialised: %s", _db_path)
+            )
+    except Exception:
+        await pool.close()
+        raise
+
+    _pool = pool
+
+    logger.info("Database initialised")
+
+
+def get_pool() -> asyncpg.Pool:
+    if _pool is None:
+        raise RuntimeError("Database pool not initialized")
+    return _pool
 
 
 async def get_by_keycloak_id(keycloak_id: str) -> dict | None:
-    async with aiosqlite.connect(_db_path) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-                "SELECT * FROM user_mapping WHERE keycloak_id = ?",
-                (keycloak_id,),
-        ) as cursor:
-            row = await cursor.fetchone()
+    pool = get_pool()
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT * FROM user_mapping
+            WHERE keycloak_id = $1
+            """,
+            keycloak_id,
+        )
+
     return dict(row) if row else None
 
 
 async def get_by_username(username: str) -> dict | None:
-    async with aiosqlite.connect(_db_path) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-                "SELECT * FROM user_mapping WHERE keycloak_username = ?",
-                (username,),
-        ) as cursor:
-            row = await cursor.fetchone()
+    pool = get_pool()
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT * FROM user_mapping
+            WHERE keycloak_username = $1
+            """,
+            username,
+        )
+
     return dict(row) if row else None
 
 
 async def upsert_user(keycloak_id: str, username: str) -> None:
-    async with aiosqlite.connect(_db_path) as db:
-        await db.execute(
+    pool = get_pool()
+
+    async with pool.acquire() as conn:
+        await conn.execute(
             """
             INSERT INTO user_mapping (keycloak_id, keycloak_username)
-            VALUES (?, ?)
-            ON CONFLICT(keycloak_id) DO UPDATE
-                SET keycloak_username = excluded.keycloak_username,
-                    updated_at        = CURRENT_TIMESTAMP
+            VALUES ($1, $2)
+            ON CONFLICT (keycloak_id) DO UPDATE
+            SET keycloak_username = EXCLUDED.keycloak_username,
+                updated_at = CURRENT_TIMESTAMP
             """,
-            (keycloak_id, username),
+            keycloak_id,
+            username,
         )
-        await db.commit()
 
 
 async def link_tinode_uid(username: str, tinode_uid: str) -> bool:
-    async with aiosqlite.connect(_db_path) as db:
+    pool = get_pool()
+
+    async with pool.acquire() as conn:
         try:
-            cursor = await db.execute(
+            result = await conn.execute(
                 """
                 UPDATE user_mapping
-                   SET tinode_uid = ?,
-                       updated_at = CURRENT_TIMESTAMP
-                WHERE keycloak_username = ?
-                   AND tinode_uid IS NULL
+                SET tinode_uid = $1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE keycloak_username = $2
+                AND tinode_uid IS NULL
                 """,
-                (tinode_uid, username),
+                tinode_uid,
+                username,
             )
-            await db.commit()
-            return cursor.rowcount > 0
-        except aiosqlite.IntegrityError:
+
+            # asyncpg возвращает строку вида "UPDATE 1"
+            return result.endswith("1")
+
+        except asyncpg.UniqueViolationError:
             return False
