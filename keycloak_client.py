@@ -40,6 +40,24 @@ def _get_jwks_client() -> PyJWKClient:
     return _jwks_client
 
 
+def _audience_matches(claims: dict[str, Any]) -> bool:
+    expected = cfg.keycloak_client_id
+    aud = claims.get("aud")
+    azp = claims.get("azp")
+
+    if isinstance(aud, str):
+        if aud == expected:
+            return True
+    elif isinstance(aud, list):
+        if expected in aud:
+            return True
+
+    if isinstance(azp, str) and azp == expected:
+        return True
+
+    return False
+
+
 # ── Публичный API ─────────────────────────────────────────────
 
 
@@ -81,8 +99,7 @@ async def verify_jwt(token: str) -> dict[str, Any] | None:
             signing_key.key,
             algorithms=["RS256", "ES256"],
             issuer=expected_issuer,
-            audience=cfg.keycloak_client_id,
-            options={"require": ["exp", "iat", "sub"]},
+            options={"require": ["exp", "iat", "sub"], "verify_aud": False},
         )
     except ExpiredSignatureError:
         logger.warning("JWT: токен просрочен")
@@ -92,6 +109,15 @@ async def verify_jwt(token: str) -> dict[str, Any] | None:
         return None
     except InvalidTokenError as exc:
         logger.warning("JWT: невалидный токен — %s", exc)
+        return None
+
+    if not _audience_matches(claims):
+        logger.warning(
+            "JWT: невалидный токен — Audience doesn't match (aud=%s azp=%s expected=%s)",
+            claims.get("aud"),
+            claims.get("azp"),
+            cfg.keycloak_client_id,
+        )
         return None
 
     return claims
