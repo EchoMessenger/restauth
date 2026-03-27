@@ -56,13 +56,32 @@ app = FastAPI(
 
 def _decode_secret(encoded: str) -> str | None:
     """
-    Декодирует base64(jwt_token) → строка токена.
-    Возвращает None при любой ошибке декодирования.
+    Декодирует secret из Tinode и возвращает JWT.
+
+    Ожидаемый формат:
+      base64("<login>:<jwt>")
+
+    Возвращает None при любой ошибке декодирования или при пустом токене.
     """
     try:
-        return base64.b64decode(encoded, validate=True).decode("utf-8").strip()
+        decoded = base64.b64decode(encoded, validate=True).decode("utf-8").strip()
     except (binascii.Error, UnicodeDecodeError):
         return None
+
+    if not decoded:
+        return None
+
+    # Strict format: "login:jwt".
+    if ":" not in decoded:
+        return None
+
+    _, token = decoded.split(":", 1)
+    token = token.strip()
+
+    if not token:
+        return None
+
+    return token
 
 
 def _build_public(claims: dict) -> dict:
@@ -80,7 +99,7 @@ def _err(msg: str) -> TinodeResponse:
 
 async def _verify_secret(secret: str | None) -> dict | None:
     """
-    Общая точка верификации: декодирует secret → JWT → claims.
+    Общая точка верификации: декодирует secret (base64(login:jwt)) → JWT → claims.
     Возвращает claims-dict или None.
     Используется и в /auth, и в /link.
     """
