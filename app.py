@@ -72,10 +72,12 @@ def _decode_secret(encoded: str) -> str | None:
         return None
 
     # Strict format: "login:jwt".
+    # Login may itself contain ':' namespace prefixes (e.g. "email:alice@example.com").
+    # Split from the right to preserve the full login part.
     if ":" not in decoded:
         return None
 
-    _, token = decoded.split(":", 1)
+    _, token = decoded.rsplit(":", 1)
     token = token.strip()
 
     if not token:
