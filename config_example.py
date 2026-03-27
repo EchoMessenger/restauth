@@ -23,12 +23,14 @@ class Settings(BaseSettings):
 
     # ── Теги ──────────────────────────────────────────────
     restricted_tag_ns: Annotated[list[str], NoDecode] = os.getenv("RESTRICTED_TAG_NS")
-    @ field_validator("restricted_tag_ns", mode="before")
-    @ classmethod
+
+    @field_validator("restricted_tag_ns", mode="before")
+    @classmethod
     def parse_restricted_tag_ns(cls, value):
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
     login_validation_re: str = os.getenv("LOGIN_VALIDATION_RE")
 
     # ── Computed ──────────────────────────────────────────
@@ -44,6 +46,13 @@ class Settings(BaseSettings):
         return (
             f"{self.keycloak_url}/realms/{self.keycloak_realm}"
             f"/protocol/openid-connect/userinfo"
+        )
+
+    @property
+    def jwks_url(self) -> str:
+        return (
+            f"{self.keycloak_url}/realms/{self.keycloak_realm}"
+            f"/protocol/openid-connect/certs"
         )
 
     class Config:

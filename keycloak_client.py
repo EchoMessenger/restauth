@@ -1,58 +1,101 @@
 """
-Асинхронный клиент Keycloak (httpx).
+Асинхронный клиент Keycloak — верификация JWT через JWKS.
+
+Flow:
+  1. При первом обращении (или при kid-mismatch) скачиваем JWKS
+     с /realms/{realm}/protocol/openid-connect/certs и кешируем.
+  2. Верифицируем подпись, exp, iss, aud локально через PyJWT.
+  3. Возвращаем dict с claims или None при любой ошибке.
 """
 
 import logging
+import time
+from typing import Any
+
 import httpx
+import jwt
+from jwt import PyJWKClient, PyJWKClientError, DecodeError, ExpiredSignatureError, InvalidTokenError
 
 from config_example import cfg
 
 logger = logging.getLogger("tinode-rest-auth.keycloak")
 
 _TIMEOUT = 10.0
+_JWKS_TTL = 3600  # секунды до принудительного обновления кеша
+
+# ── JWKS-кеш ─────────────────────────────────────────────────
+# PyJWT's PyJWKClient сам умеет кешировать и обновлять ключи,
+# поэтому держим один instance на весь процесс.
+# lifespan_in_seconds задаёт TTL встроенного кеша.
+_jwks_client: PyJWKClient | None = None
 
 
-async def authenticate(username: str, password: str) -> dict | None:
+def _get_jwks_client() -> PyJWKClient:
+    global _jwks_client
+    if _jwks_client is None:
+        _jwks_client = PyJWKClient(
+            cfg.jwks_url,
+            lifespan=_JWKS_TTL,
+            timeout=_TIMEOUT,
+        )
+    return _jwks_client
+
+
+# ── Публичный API ─────────────────────────────────────────────
+
+
+async def verify_jwt(token: str) -> dict[str, Any] | None:
     """
-    Resource Owner Password Credentials grant.
-    Возвращает token response или None.
+    Верифицирует Keycloak access-token и возвращает его claims.
+
+    Проверяет:
+      - подпись (RSA/ECDSA ключ из JWKS);
+      - срок действия (exp);
+      - issuer (iss == keycloak_url/realms/realm);
+      - audience (aud содержит keycloak_client_id).
+
+    Возвращает dict с claims или None при любой ошибке.
     """
-    payload = {
-        "grant_type": "password",
-        "client_id": cfg.keycloak_client_id,
-        "username": username,
-        "password": password,
-        "scope": "openid profile email",
-    }
-    if cfg.keycloak_client_secret:
-        payload["client_secret"] = cfg.keycloak_client_secret
-
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        try:
-            resp = await client.post(cfg.token_url, data=payload)
-        except httpx.RequestError:
-            logger.exception("Keycloak token request failed")
-            return None
-
-    if resp.status_code == 200:
-        try:
-            return resp.json()
-        except ValueError:
-            logger.warning("Keycloak token response is not valid JSON")
-            return None
-
-    logger.warning(
-        "Keycloak auth failed: status=%s body=%s",
-        resp.status_code,
-        resp.text[:300],
+    client = _get_jwks_client()
+    expected_issuer = (
+        f"{cfg.keycloak_url}/realms/{cfg.keycloak_realm}"
     )
-    return None
+
+    try:
+        # Получаем подписывающий ключ (обновляет кеш при kid-mismatch)
+        signing_key = client.get_signing_key_from_jwt(token)
+    except PyJWKClientError:
+        logger.warning("JWKS: не удалось получить ключ для токена")
+        return None
+
+    try:
+        claims = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["RS256", "ES256"],
+            issuer=expected_issuer,
+            audience=cfg.keycloak_client_id,
+            options={"require": ["exp", "iat", "sub"]},
+        )
+    except ExpiredSignatureError:
+        logger.warning("JWT: токен просрочен")
+        return None
+    except DecodeError as exc:
+        logger.warning("JWT: ошибка декодирования — %s", exc)
+        return None
+    except InvalidTokenError as exc:
+        logger.warning("JWT: невалидный токен — %s", exc)
+        return None
+
+    return claims
+
+
+# ── Оставляем get_userinfo для возможного fallback / отладки ──
 
 
 async def get_userinfo(access_token: str) -> dict | None:
-    """Получить профиль через UserInfo endpoint."""
+    """Получить профиль через UserInfo endpoint (не используется в основном flow)."""
     headers = {"Authorization": f"Bearer {access_token}"}
-
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         try:
             resp = await client.get(cfg.userinfo_url, headers=headers)

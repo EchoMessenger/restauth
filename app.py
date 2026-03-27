@@ -1,10 +1,3 @@
-"""
-Tinode REST/JSON-RPC authentication service — Keycloak back-end (FastAPI).
-
-Обязательные эндпоинты: /auth, /link, /rtagns
-Остальные: unsupported
-"""
-
 import base64
 import binascii
 import logging
@@ -13,8 +6,6 @@ import traceback
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from fastapi import APIRouter
-from fastapi.routing import APIRoute
 
 from config_example import cfg
 
@@ -28,11 +19,10 @@ from models import (
 from database import (
     init_db,
     get_by_keycloak_id,
-    get_by_username,
     link_tinode_uid,
     upsert_user,
 )
-from keycloak_client import authenticate, get_userinfo
+from keycloak_client import verify_jwt
 
 # ── Logging ───────────────────────────────────────────────────
 logging.basicConfig(
@@ -42,7 +32,7 @@ logging.basicConfig(
 logger = logging.getLogger("tinode-rest-auth")
 
 
-# ── Lifespan (инициализация БД при старте) ────────────────────
+# ── Lifespan ──────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -56,7 +46,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Tinode REST Auth — Keycloak",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -64,29 +54,42 @@ app = FastAPI(
 # ── Helpers ───────────────────────────────────────────────────
 
 
-def _parse_secret(encoded: str) -> tuple[str | None, str | None]:
+def _decode_secret(encoded: str) -> str | None:
+    """
+    Декодирует base64(jwt_token) → строка токена.
+    Возвращает None при любой ошибке декодирования.
+    """
     try:
-        raw = base64.b64decode(encoded, validate=True).decode("utf-8")
+        return base64.b64decode(encoded, validate=True).decode("utf-8").strip()
     except (binascii.Error, UnicodeDecodeError):
-        return None, None
-    parts = raw.split(":", 1)
-    if len(parts) != 2 or not parts[0] or not parts[1]:
-        return None, None
-    return parts[0], parts[1]
+        return None
 
 
-def _build_public(userinfo: dict) -> dict:
-    fn = userinfo.get("name") or userinfo.get("preferred_username", "")
+def _build_public(claims: dict) -> dict:
+    fn = claims.get("name") or claims.get("preferred_username", "")
     public: dict = {"fn": fn}
-    photo = userinfo.get("picture")
+    photo = claims.get("picture")
     if photo:
         public["photo"] = {"type": "url", "ref": photo}
     return public
 
 
 def _err(msg: str) -> TinodeResponse:
-    """Быстрый способ вернуть ошибку."""
     return TinodeResponse(err=msg)
+
+
+async def _verify_secret(secret: str | None) -> dict | None:
+    """
+    Общая точка верификации: декодирует secret → JWT → claims.
+    Возвращает claims-dict или None.
+    Используется и в /auth, и в /link.
+    """
+    if not secret:
+        return None
+    token = _decode_secret(secret)
+    if not token:
+        return None
+    return await verify_jwt(token)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -96,44 +99,29 @@ def _err(msg: str) -> TinodeResponse:
 
 @app.post("/auth", response_model=TinodeResponse, response_model_exclude_none=True)
 async def auth_endpoint(body: TinodeRequest):
-    """Аутентификация пользователя через Keycloak."""
+    """Аутентификация пользователя — верификация Keycloak JWT."""
 
     endpoint = (body.endpoint or "auth").lower()
     if endpoint != "auth":
         return _err("not found")
 
-    if not body.secret:
-        return _err("malformed")
-
-    username, password = _parse_secret(body.secret)
-    if username is None:
-        return _err("malformed")
-
-    # 1. Проверяем credentials в Keycloak
-    token_data = await authenticate(username, password)
-    if token_data is None or not isinstance(token_data, dict):
+    claims = await _verify_secret(body.secret)
+    if claims is None:
+        # secret отсутствует, не base64, или JWT невалиден/просрочен
         return _err("failed")
 
-    # 2. Получаем профиль
-    access_token = token_data.get("access_token")
-    if not access_token:
+    keycloak_id: str = claims.get("sub", "")
+    if not keycloak_id:
         return _err("internal")
 
-    userinfo = await get_userinfo(access_token)
-    if userinfo is None or not isinstance(userinfo, dict):
-        return _err("internal")
+    preferred: str = claims.get("preferred_username", "")
+    email: str = claims.get("email", "")
 
-    keycloak_id = userinfo.get("sub")
-    if not isinstance(keycloak_id, str) or not keycloak_id:
-        return _err("internal")
-    email: str = userinfo.get("email", "")
-    preferred: str = userinfo.get("preferred_username", username)
-
-    # 3. Проверяем маппинг
+    # Проверяем маппинг keycloak_id → tinode_uid
     mapping = await get_by_keycloak_id(keycloak_id)
 
     if mapping and mapping.get("tinode_uid"):
-        # Повторный вход — аккаунт уже существует
+        # Повторный вход — аккаунт уже связан
         logger.info("User %s authenticated, uid=%s", preferred, mapping["tinode_uid"])
         return TinodeResponse(
             rec=AuthRecordResponse(
@@ -144,7 +132,7 @@ async def auth_endpoint(body: TinodeRequest):
             )
         )
 
-    # 4. Первый вход — просим Tinode создать аккаунт
+    # Первый вход — регистрируем в локальной БД и просим Tinode создать аккаунт
     await upsert_user(keycloak_id, preferred)
 
     tags = [f"uname:{preferred}"]
@@ -161,7 +149,7 @@ async def auth_endpoint(body: TinodeRequest):
             state="ok",
         ),
         newacc=NewAccount(
-            public=_build_public(userinfo),
+            public=_build_public(claims),
             trusted={},
             private={},
         ),
@@ -170,45 +158,44 @@ async def auth_endpoint(body: TinodeRequest):
 
 @app.post("/link", response_model=TinodeResponse, response_model_exclude_none=True)
 async def link_endpoint(body: TinodeRequest):
-    """Привязка Tinode UID к учётной записи Keycloak."""
+    """
+    Привязка Tinode UID к учётной записи Keycloak.
+
+    Tinode вызывает /link сразу после создания нового аккаунта (в ответ на newacc),
+    передавая тот же secret что был в /auth и свежесозданный uid.
+    Мы верифицируем JWT повторно (он может быть ещё валиден) и сохраняем uid.
+    """
 
     endpoint = (body.endpoint or "link").lower()
     if endpoint != "link":
         return _err("not found")
 
-    if not body.rec or not body.rec.uid or not body.secret:
+    if not body.rec or not body.rec.uid:
         return _err("malformed")
 
-    username, password = _parse_secret(body.secret)
-    if username is None:
-        return _err("malformed")
-
-    token_data = await authenticate(username, password)
-    if token_data is None or not isinstance(token_data, dict):
+    claims = await _verify_secret(body.secret)
+    if claims is None:
         return _err("failed")
 
-    access_token = token_data.get("access_token")
-    if not access_token:
+    keycloak_id: str = claims.get("sub", "")
+    if not keycloak_id:
         return _err("internal")
 
-    userinfo = await get_userinfo(access_token)
-    if userinfo is None or not isinstance(userinfo, dict):
-        return _err("internal")
-    sub = userinfo.get("sub")
-    if not isinstance(sub, str) or not sub:
-        return _err("internal")
+    preferred: str = claims.get("preferred_username", "")
 
-    mapping = await get_by_keycloak_id(sub)
+    mapping = await get_by_keycloak_id(keycloak_id)
     if mapping is None:
+        # Нет записи в БД — /auth не вызывался или БД рассинхронизирована
         return _err("not found")
 
     if mapping.get("tinode_uid"):
+        # uid уже привязан — повторный /link не должен происходить
         return _err("duplicate value")
 
     if not await link_tinode_uid(mapping["keycloak_username"], body.rec.uid):
         return _err("internal")
 
-    logger.info("Linked %s → %s", username, body.rec.uid)
+    logger.info("Linked %s → tinode uid=%s", preferred, body.rec.uid)
 
     # Успех — пустой JSON-объект
     return TinodeResponse()
@@ -216,8 +203,7 @@ async def link_endpoint(body: TinodeRequest):
 
 @app.post("/rtagns", response_model=TinodeResponse, response_model_exclude_none=True)
 async def rtagns_endpoint():
-    """Список restricted tag name
-    spaces."""
+    """Список restricted tag namespaces."""
     return TinodeResponse(
         strarr=cfg.restricted_tag_ns,
         byteval=base64.b64encode(
@@ -237,14 +223,11 @@ async def rtagns_endpoint():
 @app.post("/gen")
 @app.post("/upd")
 async def unsupported_endpoint():
-    return JSONResponse(
-        status_code=200,
-        content={"err": "unsupported"}
-    )
+    return JSONResponse(status_code=200, content={"err": "unsupported"})
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Обработка ошибок
+#  Служебные эндпоинты и обработчики ошибок
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
@@ -267,17 +250,17 @@ async def handle_405(request: Request, exc):
 async def handle_500(request: Request, exc):
     return JSONResponse(status_code=500, content={"err": "internal"})
 
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     logger.error("Unhandled exception: %s\n%s", exc, traceback.format_exc())
     return JSONResponse(status_code=500, content={"err": "internal"})
 
+
 @app.api_route("/{full_path:path}", methods=["POST"])
 async def catch_all_post(full_path: str):
-    return JSONResponse(
-        status_code=404,
-        content={"err": "not found"}
-    )
+    return JSONResponse(status_code=404, content={"err": "not found"})
+
 
 # ── Entry point ───────────────────────────────────────────────
 
