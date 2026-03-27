@@ -34,10 +34,28 @@ class Settings(BaseSettings):
 
     # ── Computed ──────────────────────────────────────────
     @property
+    def normalized_keycloak_url(self) -> str:
+        return self.keycloak_url.rstrip("/")
+
+    @property
     def jwks_url(self) -> str:
         return (
-            f"{self.keycloak_url}/realms/{self.keycloak_realm}"
+            f"{self.normalized_keycloak_url}/realms/{self.keycloak_realm}"
             f"/protocol/openid-connect/certs"
+        )
+
+    @property
+    def token_url(self) -> str:
+        return (
+            f"{self.normalized_keycloak_url}/realms/{self.keycloak_realm}"
+            f"/protocol/openid-connect/token"
+        )
+
+    @property
+    def userinfo_url(self) -> str:
+        return (
+            f"{self.normalized_keycloak_url}/realms/{self.keycloak_realm}"
+            f"/protocol/openid-connect/userinfo"
         )
 
     class Config:

@@ -8,6 +8,7 @@ Flow:
   3. Возвращаем dict с claims или None при любой ошибке.
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -56,14 +57,22 @@ async def verify_jwt(token: str) -> dict[str, Any] | None:
     """
     client = _get_jwks_client()
     expected_issuer = (
-        f"{cfg.keycloak_url}/realms/{cfg.keycloak_realm}"
+        f"{cfg.normalized_keycloak_url}/realms/{cfg.keycloak_realm}"
     )
 
     try:
         # Получаем подписывающий ключ (обновляет кеш при kid-mismatch)
-        signing_key = client.get_signing_key_from_jwt(token)
+        loop = asyncio.get_running_loop()
+        signing_key = await loop.run_in_executor(
+            None,
+            client.get_signing_key_from_jwt,
+            token,
+        )
     except PyJWKClientError:
         logger.warning("JWKS: не удалось получить ключ для токена")
+        return None
+    except DecodeError as exc:
+        logger.warning("JWKS: ошибка декодирования токена — %s", exc)
         return None
 
     try:
