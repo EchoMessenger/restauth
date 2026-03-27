@@ -11,7 +11,6 @@ class Settings(BaseSettings):
     keycloak_url: str
     keycloak_realm: str
     keycloak_client_id: str
-    keycloak_client_secret: str
 
     # ── Приложение ────────────────────────────────────────
     host: str = os.getenv("HOST")
@@ -34,20 +33,6 @@ class Settings(BaseSettings):
     login_validation_re: str = os.getenv("LOGIN_VALIDATION_RE")
 
     # ── Computed ──────────────────────────────────────────
-    @property
-    def token_url(self) -> str:
-        return (
-            f"{self.keycloak_url}/realms/{self.keycloak_realm}"
-            f"/protocol/openid-connect/token"
-        )
-
-    @property
-    def userinfo_url(self) -> str:
-        return (
-            f"{self.keycloak_url}/realms/{self.keycloak_realm}"
-            f"/protocol/openid-connect/userinfo"
-        )
-
     @property
     def jwks_url(self) -> str:
         return (

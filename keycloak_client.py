@@ -9,10 +9,8 @@ Flow:
 """
 
 import logging
-import time
 from typing import Any
 
-import httpx
 import jwt
 from jwt import PyJWKClient, PyJWKClientError, DecodeError, ExpiredSignatureError, InvalidTokenError
 
@@ -88,27 +86,3 @@ async def verify_jwt(token: str) -> dict[str, Any] | None:
         return None
 
     return claims
-
-
-# ── Оставляем get_userinfo для возможного fallback / отладки ──
-
-
-async def get_userinfo(access_token: str) -> dict | None:
-    """Получить профиль через UserInfo endpoint (не используется в основном flow)."""
-    headers = {"Authorization": f"Bearer {access_token}"}
-    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        try:
-            resp = await client.get(cfg.userinfo_url, headers=headers)
-        except httpx.RequestError:
-            logger.exception("Keycloak userinfo request failed")
-            return None
-
-    if resp.status_code == 200:
-        return resp.json()
-
-    logger.warning(
-        "Keycloak userinfo failed: status=%s body=%s",
-        resp.status_code,
-        resp.text[:300],
-    )
-    return None
