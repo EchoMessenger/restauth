@@ -19,6 +19,7 @@ from models import (
 from database import (
     init_db,
     get_by_keycloak_id,
+    get_by_tinode_uid,
     link_tinode_uid,
     upsert_user,
 )
@@ -137,6 +138,7 @@ async def auth_endpoint(body: TinodeRequest):
 
     preferred: str = claims.get("preferred_username", "")
     email: str = claims.get("email", "")
+    display_name: str = claims.get("name") or preferred
 
     # Проверяем маппинг keycloak_id → tinode_uid
     mapping = await get_by_keycloak_id(keycloak_id)
@@ -154,7 +156,7 @@ async def auth_endpoint(body: TinodeRequest):
         )
 
     # Первый вход — регистрируем в локальной БД и просим Tinode создать аккаунт
-    await upsert_user(keycloak_id, preferred)
+    await upsert_user(keycloak_id, preferred, display_name=display_name, email=email or None)
 
     tags = [f"uname:{preferred}"]
     if email:
@@ -255,6 +257,25 @@ async def unsupported_endpoint():
 @app.get("/")
 async def index():
     return {"message": "Tinode REST auth service (Keycloak backend)"}
+
+
+@app.get("/users/by-tinode-uid/{tinode_uid}")
+async def get_user_by_tinode_uid(tinode_uid: str):
+    """
+    Служебный endpoint для внутренних сервисов (например, audit):
+    резолвит Tinode UID → Keycloak username/displayName.
+    """
+    mapping = await get_by_tinode_uid(tinode_uid)
+    if mapping is None:
+        return JSONResponse(status_code=404, content={"err": "not found"})
+
+    return {
+        "tinodeUid": mapping.get("tinode_uid"),
+        "keycloakId": mapping.get("keycloak_id"),
+        "keycloakUsername": mapping.get("keycloak_username"),
+        "displayName": mapping.get("display_name") or mapping.get("keycloak_username"),
+        "email": mapping.get("email"),
+    }
 
 
 @app.exception_handler(404)
