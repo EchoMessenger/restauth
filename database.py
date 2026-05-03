@@ -30,11 +30,25 @@ async def init_db() -> None:
                 keycloak_id       TEXT PRIMARY KEY,
                 keycloak_username TEXT UNIQUE NOT NULL,
                 tinode_uid        TEXT UNIQUE,
+                display_name      TEXT,
+                email             TEXT,
                 created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
             )
+            # Backward-compatible: add columns if table existed before.
+            await conn.execute("ALTER TABLE user_mapping ADD COLUMN IF NOT EXISTS display_name TEXT")
+            await conn.execute("ALTER TABLE user_mapping ADD COLUMN IF NOT EXISTS email TEXT")
+            # Add prefixed tinode_uid column for audit service compatibility (stores 'usr' || tinode_uid)
+            await conn.execute("""
+            ALTER TABLE user_mapping ADD COLUMN IF NOT EXISTS tinode_uid_prefixed TEXT
+            GENERATED ALWAYS AS ('usr' || tinode_uid) STORED
+            """)
+            # Create index on prefixed column for efficient lookups
+            await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tinode_uid_prefixed ON user_mapping(tinode_uid_prefixed)
+            """)
     except Exception:
         await pool.close()
         raise
@@ -80,20 +94,82 @@ async def get_by_username(username: str) -> dict | None:
     return dict(row) if row else None
 
 
-async def upsert_user(keycloak_id: str, username: str) -> None:
+async def get_by_tinode_uid(tinode_uid: str) -> dict | None:
+    pool = get_pool()
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT * FROM user_mapping
+            WHERE tinode_uid = $1
+            """,
+            tinode_uid,
+        )
+
+    return dict(row) if row else None
+
+
+async def get_by_tinode_uid_with_fallback(tinode_uid: str) -> dict | None:
+    """
+    Lookup user by tinode_uid with fallback support.
+    First tries to match the prefixed column (tinode_uid_prefixed = 'usr' || tinode_uid).
+    If not found and uid starts with 'usr', strips the prefix and tries the unprefixed column.
+    Returns mapping or None.
+    """
+    pool = get_pool()
+
+    async with pool.acquire() as conn:
+        # First, try to find by prefixed tinode_uid (e.g., audit service sends 'usr123')
+        row = await conn.fetchrow(
+            """
+            SELECT * FROM user_mapping
+            WHERE tinode_uid_prefixed = $1
+            """,
+            tinode_uid,
+        )
+
+        if row:
+            return dict(row)
+
+        # If not found and uid starts with 'usr', try without the prefix for backward compatibility
+        if tinode_uid.startswith("usr"):
+            unprefixed = tinode_uid[3:]  # Remove 'usr' prefix
+            row = await conn.fetchrow(
+                """
+                SELECT * FROM user_mapping
+                WHERE tinode_uid = $1
+                """,
+                unprefixed,
+            )
+            if row:
+                return dict(row)
+
+    return None
+
+
+async def upsert_user(
+    keycloak_id: str,
+    username: str,
+    display_name: str | None = None,
+    email: str | None = None,
+) -> None:
     pool = get_pool()
 
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO user_mapping (keycloak_id, keycloak_username)
-            VALUES ($1, $2)
+            INSERT INTO user_mapping (keycloak_id, keycloak_username, display_name, email)
+            VALUES ($1, $2, $3, $4)
             ON CONFLICT (keycloak_id) DO UPDATE
             SET keycloak_username = EXCLUDED.keycloak_username,
+                display_name = COALESCE(EXCLUDED.display_name, user_mapping.display_name),
+                email = COALESCE(EXCLUDED.email, user_mapping.email),
                 updated_at = CURRENT_TIMESTAMP
             """,
             keycloak_id,
             username,
+            display_name,
+            email,
         )
 
 

@@ -11,7 +11,6 @@ class Settings(BaseSettings):
     keycloak_url: str
     keycloak_realm: str
     keycloak_client_id: str
-    keycloak_client_secret: str
 
     # ── Приложение ────────────────────────────────────────
     host: str = os.getenv("HOST")
@@ -23,26 +22,39 @@ class Settings(BaseSettings):
 
     # ── Теги ──────────────────────────────────────────────
     restricted_tag_ns: Annotated[list[str], NoDecode] = os.getenv("RESTRICTED_TAG_NS")
-    @ field_validator("restricted_tag_ns", mode="before")
-    @ classmethod
+
+    @field_validator("restricted_tag_ns", mode="before")
+    @classmethod
     def parse_restricted_tag_ns(cls, value):
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
+
     login_validation_re: str = os.getenv("LOGIN_VALIDATION_RE")
 
     # ── Computed ──────────────────────────────────────────
     @property
+    def normalized_keycloak_url(self) -> str:
+        return self.keycloak_url.rstrip("/")
+
+    @property
+    def jwks_url(self) -> str:
+        return (
+            f"{self.normalized_keycloak_url}/realms/{self.keycloak_realm}"
+            f"/protocol/openid-connect/certs"
+        )
+
+    @property
     def token_url(self) -> str:
         return (
-            f"{self.keycloak_url}/realms/{self.keycloak_realm}"
+            f"{self.normalized_keycloak_url}/realms/{self.keycloak_realm}"
             f"/protocol/openid-connect/token"
         )
 
     @property
     def userinfo_url(self) -> str:
         return (
-            f"{self.keycloak_url}/realms/{self.keycloak_realm}"
+            f"{self.normalized_keycloak_url}/realms/{self.keycloak_realm}"
             f"/protocol/openid-connect/userinfo"
         )
 
