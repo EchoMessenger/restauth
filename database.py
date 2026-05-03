@@ -40,6 +40,15 @@ async def init_db() -> None:
             # Backward-compatible: add columns if table existed before.
             await conn.execute("ALTER TABLE user_mapping ADD COLUMN IF NOT EXISTS display_name TEXT")
             await conn.execute("ALTER TABLE user_mapping ADD COLUMN IF NOT EXISTS email TEXT")
+            # Add prefixed tinode_uid column for audit service compatibility (stores 'usr' || tinode_uid)
+            await conn.execute("""
+            ALTER TABLE user_mapping ADD COLUMN IF NOT EXISTS tinode_uid_prefixed TEXT
+            GENERATED ALWAYS AS ('usr' || tinode_uid) STORED
+            """)
+            # Create index on prefixed column for efficient lookups
+            await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tinode_uid_prefixed ON user_mapping(tinode_uid_prefixed)
+            """)
     except Exception:
         await pool.close()
         raise
@@ -98,6 +107,44 @@ async def get_by_tinode_uid(tinode_uid: str) -> dict | None:
         )
 
     return dict(row) if row else None
+
+
+async def get_by_tinode_uid_with_fallback(tinode_uid: str) -> dict | None:
+    """
+    Lookup user by tinode_uid with fallback support.
+    First tries to match the prefixed column (tinode_uid_prefixed = 'usr' || tinode_uid).
+    If not found and uid starts with 'usr', strips the prefix and tries the unprefixed column.
+    Returns mapping or None.
+    """
+    pool = get_pool()
+
+    async with pool.acquire() as conn:
+        # First, try to find by prefixed tinode_uid (e.g., audit service sends 'usr123')
+        row = await conn.fetchrow(
+            """
+            SELECT * FROM user_mapping
+            WHERE tinode_uid_prefixed = $1
+            """,
+            tinode_uid,
+        )
+
+        if row:
+            return dict(row)
+
+        # If not found and uid starts with 'usr', try without the prefix for backward compatibility
+        if tinode_uid.startswith("usr"):
+            unprefixed = tinode_uid[3:]  # Remove 'usr' prefix
+            row = await conn.fetchrow(
+                """
+                SELECT * FROM user_mapping
+                WHERE tinode_uid = $1
+                """,
+                unprefixed,
+            )
+            if row:
+                return dict(row)
+
+    return None
 
 
 async def upsert_user(

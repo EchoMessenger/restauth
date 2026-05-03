@@ -20,6 +20,7 @@ from database import (
     init_db,
     get_by_keycloak_id,
     get_by_tinode_uid,
+    get_by_tinode_uid_with_fallback,
     link_tinode_uid,
     upsert_user,
 )
@@ -343,9 +344,12 @@ async def get_user_by_tinode_uid(tinode_uid: str):
     """
     Служебный endpoint для внутренних сервисов (например, audit):
     резолвит Tinode UID → Keycloak username/displayName.
+    
+    Supports both prefixed ('usr123') and unprefixed ('123') tinode_uid formats
+    for backward compatibility.
     """
     logger.debug("Lookup by Tinode UID requested uid=%s", tinode_uid)
-    mapping = await get_by_tinode_uid(tinode_uid)
+    mapping = await get_by_tinode_uid_with_fallback(tinode_uid)
     if mapping is None:
         logger.info("Lookup by Tinode UID not found uid=%s", tinode_uid)
         return JSONResponse(status_code=404, content={"err": "not found"})
