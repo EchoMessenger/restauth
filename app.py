@@ -179,9 +179,11 @@ def _build_tags(
     чтобы пользователи не могли назначать их себе самостоятельно.
     """
     tags: list[str] = [f"uname:{preferred}"]
+    logger.debug("Building tags for user preferred=%s", preferred)
 
     if email:
         tags.append(f"email:{email}")
+        logger.debug("Added email tag: email:%s", email)
 
     # ФИ — отдельные теги для поиска по имени, фамилии и полному имени
     given_name: str = claims.get("given_name", "").strip()
@@ -190,18 +192,25 @@ def _build_tags(
 
     if given_name:
         tags.append(f"fn:{given_name}")
+        logger.debug("Added given_name tag: fn:%s", given_name)
     if family_name:
         tags.append(f"fn:{family_name}")
+        logger.debug("Added family_name tag: fn:%s", family_name)
     # Полное имя — только если отличается от отдельных частей и не пусто
     if full_name and full_name not in (given_name, family_name):
         tags.append(f"fn:{full_name}")
+        logger.debug("Added full_name tag: fn:%s", full_name)
 
     # Роли из Keycloak JWT
     roles = _extract_roles(access_token, getattr(cfg, "keycloak_client_id", None))
-    for role in roles:
-        tags.append(f"role:{role}")
+    if roles:
+        logger.debug("Extracted %d roles from JWT: %s", len(roles), roles)
+        for role in roles:
+            tags.append(f"role:{role}")
+    else:
+        logger.debug("No roles found in JWT")
 
-    logger.debug("Built tags for %s: %s", preferred, tags)
+    logger.info("Built tags for user preferred=%s: %s", preferred, tags)
     return tags
 
 
@@ -284,6 +293,7 @@ async def auth_endpoint(body: TinodeRequest):
 
     # Теги формируем всегда — они могут измениться (новая роль, смена имени)
     tags = _build_tags(claims, access_token, preferred, email)
+    logger.info("User preferred=%s tags assembled: %s (count=%d)", preferred, tags, len(tags))
 
     # Проверяем маппинг
     mapping = await get_by_keycloak_id(keycloak_id)
@@ -291,10 +301,11 @@ async def auth_endpoint(body: TinodeRequest):
     if mapping and mapping.get("tinode_uid"):
         # Повторный вход — аккаунт уже связан
         logger.info(
-            "AUTH success existing user preferred=%s keycloak_id=%s uid=%s",
+            "AUTH success existing user preferred=%s keycloak_id=%s uid=%s tags=%s",
             preferred,
             keycloak_id,
             mapping["tinode_uid"],
+            tags,
         )
         return TinodeResponse(
             rec=AuthRecordResponse(
@@ -310,10 +321,11 @@ async def auth_endpoint(body: TinodeRequest):
     await upsert_user(keycloak_id, preferred, display_name=display_name, email=email or None)
 
     logger.info(
-        "AUTH success first login preferred=%s keycloak_id=%s tags=%s",
+        "AUTH success first login preferred=%s keycloak_id=%s tags=%s (count=%d)",
         preferred,
         keycloak_id,
         tags,
+        len(tags),
     )
 
     return TinodeResponse(

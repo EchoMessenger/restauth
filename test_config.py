@@ -18,7 +18,8 @@ try:
     print(f'  Keycloak URL: {cfg.keycloak_url}')
     print(f'  Keycloak Realm: {cfg.keycloak_realm}')
     print(f'  Keycloak Client ID: {cfg.keycloak_client_id}')
-    print(f'  Keycloak Client Secret: "{cfg.keycloak_client_secret}" (empty is OK for public clients)')
+    secret_status = '(empty is OK for public clients)' if not cfg.keycloak_client_secret else '(configured, not shown)'
+    print(f'  Keycloak Client Secret: {secret_status}')
     print(f'  Host: {cfg.host}:{cfg.port}')
     exit(0)
 except Exception as e:
