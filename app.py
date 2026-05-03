@@ -159,7 +159,7 @@ def _extract_roles(access_token: str, client_id: str | None = None) -> list[str]
 
 
 def _build_tags(
-    userinfo: dict,
+    claims: dict,
     access_token: str,
     preferred: str,
     email: str,
@@ -184,9 +184,9 @@ def _build_tags(
         tags.append(f"email:{email}")
 
     # ФИ — отдельные теги для поиска по имени, фамилии и полному имени
-    given_name: str = userinfo.get("given_name", "").strip()
-    family_name: str = userinfo.get("family_name", "").strip()
-    full_name: str = userinfo.get("name", "").strip()
+    given_name: str = claims.get("given_name", "").strip()
+    family_name: str = claims.get("family_name", "").strip()
+    full_name: str = claims.get("name", "").strip()
 
     if given_name:
         tags.append(f"fn:{given_name}")
@@ -224,10 +224,10 @@ def _claims_meta(claims: dict | None) -> str:
     return f"sub={sub} preferred={preferred} exp={exp}"
 
 
-async def _verify_secret(secret: str | None) -> dict | None:
+async def _verify_secret(secret: str | None) -> tuple[dict, str] | None:
     """
     Общая точка верификации: декодирует secret (base64(login:jwt)) → JWT → claims.
-    Возвращает claims-dict или None.
+    Возвращает (claims-dict, jwt_token) или None.
     Используется и в /auth, и в /link.
     """
     if not secret:
@@ -242,7 +242,7 @@ async def _verify_secret(secret: str | None) -> dict | None:
         logger.debug("Secret verification failed: JWT validation returned no claims")
     else:
         logger.debug("Secret verified successfully: %s", _claims_meta(claims))
-    return claims
+    return (claims, token) if claims else None
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -265,11 +265,13 @@ async def auth_endpoint(body: TinodeRequest):
         logger.warning("AUTH rejected: unexpected endpoint=%s", endpoint)
         return _err("not found")
 
-    claims = await _verify_secret(body.secret)
-    if claims is None:
+    result = await _verify_secret(body.secret)
+    if result is None:
         # secret отсутствует, не base64, или JWT невалиден/просрочен
         logger.warning("AUTH failed: secret verification failed (%s)", _secret_meta(body.secret))
         return _err("failed")
+    
+    claims, access_token = result
 
     keycloak_id: str = claims.get("sub", "")
     if not keycloak_id:
@@ -280,17 +282,10 @@ async def auth_endpoint(body: TinodeRequest):
     email: str = claims.get("email", "")
     display_name: str = claims.get("name") or preferred
 
-    keycloak_id = userinfo.get("sub")
-    if not isinstance(keycloak_id, str) or not keycloak_id:
-        return _err("internal")
+    # Теги формируем всегда — они могут измениться (новая роль, смена имени)
+    tags = _build_tags(claims, access_token, preferred, email)
 
-    email: str = userinfo.get("email", "")
-    preferred: str = userinfo.get("preferred_username", username)
-
-    # 3. Теги формируем всегда — они могут измениться (новая роль, смена имени)
-    tags = _build_tags(userinfo, access_token, preferred, email)
-
-    # 4. Проверяем маппинг
+    # Проверяем маппинг
     mapping = await get_by_keycloak_id(keycloak_id)
 
     if mapping and mapping.get("tinode_uid"):
@@ -361,10 +356,12 @@ async def link_endpoint(body: TinodeRequest):
         logger.warning("LINK failed: missing rec.uid")
         return _err("malformed")
 
-    claims = await _verify_secret(body.secret)
-    if claims is None:
+    result = await _verify_secret(body.secret)
+    if result is None:
         logger.warning("LINK failed: secret verification failed (%s)", _secret_meta(body.secret))
         return _err("failed")
+    
+    claims, _ = result  # We don't need access_token in /link
 
     keycloak_id: str = claims.get("sub", "")
     if not keycloak_id:
