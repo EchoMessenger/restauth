@@ -1,6 +1,7 @@
 import base64
 import binascii
 import logging
+import re
 from contextlib import asynccontextmanager
 import traceback
 
@@ -173,16 +174,26 @@ def _build_tags(
       fn:<given_name>        — поиск по имени
       fn:<family_name>       — поиск по фамилии
       fn:<given family>      — поиск по полному имени
+      fn:<given_family>      — full-name токен с "_"
+      basic:<username>       — совместимость с plain-text поиском Tinode
       role:<role_name>       — роль пользователя из Keycloak
 
     Теги `role:*` должны быть добавлены в restricted_tag_ns (см. /rtagns),
     чтобы пользователи не могли назначать их себе самостоятельно.
     """
-    tags: list[str] = [f"uname:{preferred}"]
+    tags: list[str] = []
+    seen_tags: set[str] = set()
+
+    def add_tag(tag: str) -> None:
+        if tag and tag not in seen_tags:
+            seen_tags.add(tag)
+            tags.append(tag)
+
+    add_tag(f"uname:{preferred}")
     logger.debug("Building tags for user preferred=%s", preferred)
 
     if email:
-        tags.append(f"email:{email}")
+        add_tag(f"email:{email}")
         logger.debug("Added email tag: email:%s", email)
 
     # ФИ — отдельные теги для поиска по имени, фамилии и полному имени
@@ -190,23 +201,40 @@ def _build_tags(
     family_name: str = claims.get("family_name", "").strip()
     full_name: str = claims.get("name", "").strip()
 
+    def add_fn_tag(value: str) -> None:
+        clean = value.strip()
+        if not clean:
+            return
+        add_tag(f"fn:{clean}")
+        add_tag(f"fn:{clean.lower()}")
+
     if given_name:
-        tags.append(f"fn:{given_name}")
+        add_fn_tag(given_name)
         logger.debug("Added given_name tag: fn:%s", given_name)
     if family_name:
-        tags.append(f"fn:{family_name}")
+        add_fn_tag(family_name)
         logger.debug("Added family_name tag: fn:%s", family_name)
     # Полное имя — только если отличается от отдельных частей и не пусто
     if full_name and full_name not in (given_name, family_name):
-        tags.append(f"fn:{full_name}")
+        add_fn_tag(full_name)
+        full_name_underscore = re.sub(r"\s+", "_", full_name.strip().lower())
+        if full_name_underscore:
+            add_tag(f"fn:{full_name_underscore}")
         logger.debug("Added full_name tag: fn:%s", full_name)
+
+    # Совместимость с поиском Tinode по plain-text токенам.
+    # В Tinode plain-токены переписываются в basic:* через rewriteTag/validator.PreCheck.
+    normalized_preferred = re.sub(r"[^a-z0-9_.\-@]", "", preferred.strip().lower())
+    if 3 <= len(normalized_preferred) <= 64:
+        add_tag(f"basic:{normalized_preferred}")
+        logger.debug("Added compatibility tag: basic:%s", normalized_preferred)
 
     # Роли из Keycloak JWT
     roles = _extract_roles(access_token, getattr(cfg, "keycloak_client_id", None))
     if roles:
         logger.debug("Extracted %d roles from JWT: %s", len(roles), roles)
         for role in roles:
-            tags.append(f"role:{role}")
+            add_tag(f"role:{role}")
     else:
         logger.debug("No roles found in JWT")
 
