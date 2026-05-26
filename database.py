@@ -112,35 +112,30 @@ async def get_by_tinode_uid(tinode_uid: str) -> dict | None:
 async def get_by_tinode_uid_with_fallback(tinode_uid: str) -> dict | None:
     """
     Lookup user by tinode_uid with fallback support.
-    First tries to match the prefixed column (tinode_uid_prefixed = 'usr' || tinode_uid).
-    If not found and uid starts with 'usr', strips the prefix and tries the unprefixed column.
+    Supports both prefixed ('usr123') and unprefixed ('123') Tinode UIDs.
     Returns mapping or None.
     """
     pool = get_pool()
+    uid = tinode_uid.strip()
+    if not uid:
+        return None
+
+    candidates = [uid]
+    if uid.startswith("usr") and len(uid) > 3:
+        candidates.append(uid[3:])
+    else:
+        candidates.append(f"usr{uid}")
 
     async with pool.acquire() as conn:
-        # First, try to find by prefixed tinode_uid (e.g., audit service sends 'usr123')
-        row = await conn.fetchrow(
-            """
-            SELECT * FROM user_mapping
-            WHERE tinode_uid_prefixed = $1
-            """,
-            tinode_uid,
-        )
-
-        if row:
-            return dict(row)
-
-        # If not found and uid starts with 'usr', try without the prefix for backward compatibility
-        if tinode_uid.startswith("usr"):
-            unprefixed = tinode_uid[3:]  # Remove 'usr' prefix
+        for candidate in dict.fromkeys(candidates):
             row = await conn.fetchrow(
                 """
                 SELECT * FROM user_mapping
-                WHERE tinode_uid = $1
+                WHERE tinode_uid = $1 OR tinode_uid_prefixed = $1
                 """,
-                unprefixed,
+                candidate,
             )
+
             if row:
                 return dict(row)
 
