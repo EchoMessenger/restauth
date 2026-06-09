@@ -1,8 +1,11 @@
 import base64
 import binascii
 import logging
+import re
 from contextlib import asynccontextmanager
 import traceback
+
+import jwt as pyjwt  # pip install PyJWT
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -32,6 +35,20 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("tinode-rest-auth")
+
+# Системные роли Keycloak, которые не нужно проксировать в Tinode
+_KEYCLOAK_SYSTEM_ROLES: frozenset[str] = frozenset(
+    {
+        "uma_authorization",
+        "offline_access",
+        "default-roles-master",
+        "default-roles-realm",
+        "create-realm",
+        "manage-users",
+        "view-users",
+        "query-users",
+    }
+)
 
 
 # ── Lifespan ──────────────────────────────────────────────────
@@ -101,6 +118,130 @@ def _build_public(claims: dict) -> dict:
     return public
 
 
+def _extract_roles(access_token: str, client_id: str | None = None) -> list[str]:
+    """
+    Извлекает роли пользователя из JWT access token Keycloak.
+
+    Собирает роли двух уровней:
+      - realm_access.roles       — роли на уровне realm
+      - resource_access.<client>.roles — роли конкретного клиента (если задан client_id)
+
+    Системные роли Keycloak отфильтровываются.
+    Возвращает отсортированный список уникальных бизнес-ролей.
+    """
+    try:
+        payload = pyjwt.decode(
+            access_token,
+            options={"verify_signature": False},
+            algorithms=["RS256", "HS256"],
+        )
+    except Exception as exc:
+        logger.warning("Failed to decode JWT for role extraction: %s", exc)
+        return []
+
+    roles: set[str] = set()
+
+    # Realm-level roles
+    realm_roles = payload.get("realm_access", {}).get("roles", [])
+    if isinstance(realm_roles, list):
+        roles.update(realm_roles)
+
+    # Client-level roles
+    if client_id:
+        client_roles = (
+            payload.get("resource_access", {})
+            .get(client_id, {})
+            .get("roles", [])
+        )
+        if isinstance(client_roles, list):
+            roles.update(client_roles)
+
+    return sorted(roles - _KEYCLOAK_SYSTEM_ROLES)
+
+
+def _build_tags(
+    claims: dict,
+    access_token: str,
+    preferred: str,
+    email: str,
+) -> list[str]:
+    """
+    Формирует список тегов пользователя для Tinode.
+
+    Теги используются для поиска пользователей и хранения метаданных:
+      uname:<username>       — поиск по логину (стандартный)
+      email:<addr>           — поиск по email (стандартный)
+      fn:<given_name>        — поиск по имени
+      fn:<family_name>       — поиск по фамилии
+      fn:<given family>      — поиск по полному имени
+      fn:<given_family>      — full-name токен с "_"
+      basic:<username>       — совместимость с plain-text поиском Tinode
+      role:<role_name>       — роль пользователя из Keycloak
+
+    Теги `role:*` должны быть добавлены в restricted_tag_ns (см. /rtagns),
+    чтобы пользователи не могли назначать их себе самостоятельно.
+    """
+    tags: list[str] = []
+    seen_tags: set[str] = set()
+
+    def add_tag(tag: str) -> None:
+        if tag and tag not in seen_tags:
+            seen_tags.add(tag)
+            tags.append(tag)
+
+    add_tag(f"uname:{preferred}")
+    logger.debug("Building tags for user preferred=%s", preferred)
+
+    if email:
+        add_tag(f"email:{email}")
+        logger.debug("Added email tag: email:%s", email)
+
+    # ФИ — отдельные теги для поиска по имени, фамилии и полному имени
+    given_name: str = claims.get("given_name", "").strip()
+    family_name: str = claims.get("family_name", "").strip()
+    full_name: str = claims.get("name", "").strip()
+
+    def add_fn_tag(value: str) -> None:
+        clean = value.strip()
+        if not clean:
+            return
+        add_tag(f"fn:{clean}")
+        add_tag(f"fn:{clean.lower()}")
+
+    if given_name:
+        add_fn_tag(given_name)
+        logger.debug("Added given_name tag: fn:%s", given_name)
+    if family_name:
+        add_fn_tag(family_name)
+        logger.debug("Added family_name tag: fn:%s", family_name)
+    # Полное имя — только если отличается от отдельных частей и не пусто
+    if full_name and full_name not in (given_name, family_name):
+        add_fn_tag(full_name)
+        full_name_underscore = re.sub(r"\s+", "_", full_name.strip().lower())
+        if full_name_underscore:
+            add_tag(f"fn:{full_name_underscore}")
+        logger.debug("Added full_name tag: fn:%s", full_name)
+
+    # Совместимость с поиском Tinode по plain-text токенам.
+    # В Tinode plain-токены переписываются в basic:* через rewriteTag/validator.PreCheck.
+    normalized_preferred = re.sub(r"[^a-z0-9_.\-@]", "", preferred.strip().lower())
+    if 3 <= len(normalized_preferred) <= 64:
+        add_tag(f"basic:{normalized_preferred}")
+        logger.debug("Added compatibility tag: basic:%s", normalized_preferred)
+
+    # Роли из Keycloak JWT
+    roles = _extract_roles(access_token, getattr(cfg, "keycloak_client_id", None))
+    if roles:
+        logger.debug("Extracted %d roles from JWT: %s", len(roles), roles)
+        for role in roles:
+            add_tag(f"role:{role}")
+    else:
+        logger.debug("No roles found in JWT")
+
+    logger.info("Built tags for user preferred=%s: %s", preferred, tags)
+    return tags
+
+
 def _err(msg: str) -> TinodeResponse:
     return TinodeResponse(err=msg)
 
@@ -120,10 +261,10 @@ def _claims_meta(claims: dict | None) -> str:
     return f"sub={sub} preferred={preferred} exp={exp}"
 
 
-async def _verify_secret(secret: str | None) -> dict | None:
+async def _verify_secret(secret: str | None) -> tuple[dict, str] | None:
     """
     Общая точка верификации: декодирует secret (base64(login:jwt)) → JWT → claims.
-    Возвращает claims-dict или None.
+    Возвращает (claims-dict, jwt_token) или None.
     Используется и в /auth, и в /link.
     """
     if not secret:
@@ -138,7 +279,7 @@ async def _verify_secret(secret: str | None) -> dict | None:
         logger.debug("Secret verification failed: JWT validation returned no claims")
     else:
         logger.debug("Secret verified successfully: %s", _claims_meta(claims))
-    return claims
+    return (claims, token) if claims else None
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -161,11 +302,13 @@ async def auth_endpoint(body: TinodeRequest):
         logger.warning("AUTH rejected: unexpected endpoint=%s", endpoint)
         return _err("not found")
 
-    claims = await _verify_secret(body.secret)
-    if claims is None:
+    result = await _verify_secret(body.secret)
+    if result is None:
         # secret отсутствует, не base64, или JWT невалиден/просрочен
         logger.warning("AUTH failed: secret verification failed (%s)", _secret_meta(body.secret))
         return _err("failed")
+    
+    claims, access_token = result
 
     keycloak_id: str = claims.get("sub", "")
     if not keycloak_id:
@@ -176,21 +319,27 @@ async def auth_endpoint(body: TinodeRequest):
     email: str = claims.get("email", "")
     display_name: str = claims.get("name") or preferred
 
-    # Проверяем маппинг keycloak_id → tinode_uid
+    # Теги формируем всегда — они могут измениться (новая роль, смена имени)
+    tags = _build_tags(claims, access_token, preferred, email)
+    logger.info("User preferred=%s tags assembled: %s (count=%d)", preferred, tags, len(tags))
+
+    # Проверяем маппинг
     mapping = await get_by_keycloak_id(keycloak_id)
 
     if mapping and mapping.get("tinode_uid"):
         # Повторный вход — аккаунт уже связан
         logger.info(
-            "AUTH success existing user preferred=%s keycloak_id=%s uid=%s",
+            "AUTH success existing user preferred=%s keycloak_id=%s uid=%s tags=%s",
             preferred,
             keycloak_id,
             mapping["tinode_uid"],
+            tags,
         )
         return TinodeResponse(
             rec=AuthRecordResponse(
                 uid=mapping["tinode_uid"],
                 authlvl="auth",
+                tags=tags,
                 features=0,
                 state="ok",
             )
@@ -199,15 +348,12 @@ async def auth_endpoint(body: TinodeRequest):
     # Первый вход — регистрируем в локальной БД и просим Tinode создать аккаунт
     await upsert_user(keycloak_id, preferred, display_name=display_name, email=email or None)
 
-    tags = [f"uname:{preferred}"]
-    if email:
-        tags.append(f"email:{email}")
-
     logger.info(
-        "AUTH success first login preferred=%s keycloak_id=%s tags=%s",
+        "AUTH success first login preferred=%s keycloak_id=%s tags=%s (count=%d)",
         preferred,
         keycloak_id,
         tags,
+        len(tags),
     )
 
     return TinodeResponse(
@@ -250,10 +396,12 @@ async def link_endpoint(body: TinodeRequest):
         logger.warning("LINK failed: missing rec.uid")
         return _err("malformed")
 
-    claims = await _verify_secret(body.secret)
-    if claims is None:
+    result = await _verify_secret(body.secret)
+    if result is None:
         logger.warning("LINK failed: secret verification failed (%s)", _secret_meta(body.secret))
         return _err("failed")
+    
+    claims, _ = result  # We don't need access_token in /link
 
     keycloak_id: str = claims.get("sub", "")
     if not keycloak_id:
@@ -305,10 +453,19 @@ async def link_endpoint(body: TinodeRequest):
 
 @app.post("/rtagns", response_model=TinodeResponse, response_model_exclude_none=True)
 async def rtagns_endpoint():
-    """Список restricted tag namespaces."""
-    logger.debug("RTAGNS requested")
+    """
+    Список restricted tag namespaces.
+
+    Неймспейс `role` добавлен в restricted, чтобы пользователи
+    не могли назначать роли себе напрямую через Tinode-клиент.
+    Управление ролями — исключительно через Keycloak.
+    """
+    restricted = list(cfg.restricted_tag_ns)
+    if "role" not in restricted:
+        restricted.append("role")
+
     return TinodeResponse(
-        strarr=cfg.restricted_tag_ns,
+        strarr=restricted,
         byteval=base64.b64encode(
             cfg.login_validation_re.encode()
         ).decode("utf-8"),
@@ -344,7 +501,7 @@ async def get_user_by_tinode_uid(tinode_uid: str):
     """
     Служебный endpoint для внутренних сервисов (например, audit):
     резолвит Tinode UID → Keycloak username/displayName.
-    
+
     Supports both prefixed ('usr123') and unprefixed ('123') tinode_uid formats
     for backward compatibility.
     """
@@ -398,6 +555,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 async def catch_all_post(full_path: str):
     logger.debug("Unknown POST path=%s", full_path)
     return JSONResponse(status_code=404, content={"err": "not found"})
+
 
 
 # ── Entry point ───────────────────────────────────────────────

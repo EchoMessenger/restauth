@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     keycloak_url: str
     keycloak_realm: str
     keycloak_client_id: str
+    keycloak_client_secret: str = ""
 
     # ── Приложение ────────────────────────────────────────
     host: str = os.getenv("HOST")
